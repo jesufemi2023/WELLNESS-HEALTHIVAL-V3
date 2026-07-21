@@ -27,6 +27,7 @@ export async function createServer() {
 
   // Initialize Supabase Admin
   let supabase: any;
+  let lastServerMutationTime = Date.now();
   try {
     supabase = getSupabaseAdmin();
     if (supabase) {
@@ -228,42 +229,51 @@ export async function createServer() {
 
   // --- Sync Check & Metadata ---
   async function updateSyncTimestamp() {
-    if (!supabase) return;
-    try {
-      const now = new Date().toISOString();
-      const { error } = await supabase
-        .from('app_metadata')
-        .upsert({ id: 'global_sync', last_updated: now });
-      
-      if (error) {
-        // If table doesn't exist, we might get an error. 
-        // In a real app, we'd ensure the table exists via migration.
-        console.warn("Sync Timestamp Update Error (Table might not exist):", error.message);
-      }
-    } catch (e) {
-      console.error("Failed to update sync timestamp:", e);
-    }
+    lastServerMutationTime = Date.now();
   }
 
   app.get("/api/sync-check", async (req, res) => {
-    if (!supabase) return res.json({ last_updated: new Date().toISOString() });
+    let latestDbTime = 0;
     
-    try {
-      const { data, error } = await supabase
-        .from('app_metadata')
-        .select('last_updated')
-        .eq('id', 'global_sync')
-        .maybeSingle();
-      
-      if (error || !data) {
-        // Fallback if table doesn't exist or no record
-        return res.json({ last_updated: new Date(0).toISOString() });
+    if (supabase) {
+      try {
+        const [prodResult, pkgResult, blogResult] = await Promise.all([
+          supabase
+            .from('products')
+            .select('updated_at')
+            .order('updated_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          supabase
+            .from('recommended_packages')
+            .select('updated_at')
+            .order('updated_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          supabase
+            .from('blog_posts')
+            .select('updated_at')
+            .order('updated_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        ]);
+
+        if (prodResult?.data?.updated_at) {
+          latestDbTime = Math.max(latestDbTime, new Date(prodResult.data.updated_at).getTime());
+        }
+        if (pkgResult?.data?.updated_at) {
+          latestDbTime = Math.max(latestDbTime, new Date(pkgResult.data.updated_at).getTime());
+        }
+        if (blogResult?.data?.updated_at) {
+          latestDbTime = Math.max(latestDbTime, new Date(blogResult.data.updated_at).getTime());
+        }
+      } catch (dbErr) {
+        console.error("Error querying latest db timestamps for sync-check:", dbErr);
       }
-      
-      res.json(data);
-    } catch (e) {
-      res.json({ last_updated: new Date(0).toISOString() });
     }
+
+    const finalTimestamp = Math.max(latestDbTime, lastServerMutationTime);
+    res.json({ last_updated: new Date(finalTimestamp).toISOString() });
   });
 
   // --- Admin CRUD Routes ---
